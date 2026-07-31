@@ -11,6 +11,9 @@ import {
 } from 'firebase/auth';
 import {
     getFirestore,
+    initializeFirestore,
+    persistentLocalCache,
+    persistentMultipleTabManager,
     collection,
     doc,
     setDoc,
@@ -50,10 +53,40 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
-const db = getFirestore(app);
+const db = initializeFirestore(app, {
+    localCache: persistentLocalCache({
+        tabManager: persistentMultipleTabManager()
+    })
+});
 
 const APP_ID = 'teologia-paulina-app';
 const LOGO_URL = "https://i.postimg.cc/DwmFG9gG/Logo-TP.jpg";
+
+// Safe wrapper for localStorage access
+const safeLocalStorage = {
+    getItem(key) {
+        try {
+            return localStorage.getItem(key);
+        } catch (e) {
+            console.warn("localStorage.getItem failed:", e);
+            return null;
+        }
+    },
+    setItem(key, value) {
+        try {
+            localStorage.setItem(key, value);
+        } catch (e) {
+            console.warn("localStorage.setItem failed:", e);
+        }
+    },
+    removeItem(key) {
+        try {
+            localStorage.removeItem(key);
+        } catch (e) {
+            console.warn("localStorage.removeItem failed:", e);
+        }
+    }
+};
 const FAVICON_URL = "https://i.postimg.cc/DwmFG9gG/Logo-TP.jpg";
 const YOUTUBE_CHANNEL = "https://youtube.com/@teologiapaulina?si=5gwOAmgbXHh1hbgc";
 
@@ -270,6 +303,17 @@ const AdminView = ({ staticPlan, dailyContentMap, allUsers, allCompletions, user
 
     const updateUserStatus = async (uid, field, value) => {
         await updateDoc(doc(db, 'artifacts', APP_ID, 'users', uid), { [field]: value });
+    };
+
+    const deleteUser = async (uid) => {
+        if (!confirm("⚠️ ¿Estás seguro de que deseas eliminar este usuario y su solicitud de aprobación? Esta acción no se puede deshacer y borrará al usuario de la base de datos.")) return;
+        try {
+            await deleteDoc(doc(db, 'artifacts', APP_ID, 'users', uid));
+            alert("✅ Usuario y solicitud eliminados correctamente.");
+        } catch (error) {
+            console.error(error);
+            alert("❌ Error al eliminar el usuario.");
+        }
     };
 
     const setMassiveStartDate = async () => {
@@ -507,6 +551,11 @@ const AdminView = ({ staticPlan, dailyContentMap, allUsers, allCompletions, user
                                     {u.uid !== user.uid && (
                                         <>
                                             <button onClick={() => updateUserStatus(u.id, 'isApproved', !u.isApproved)} className={`flex-1 px-2 py-1 text-xs border rounded ${u.isApproved ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100'}`}>{u.isApproved ? 'Aprobado' : 'Aprobar'}</button>
+                                            {!u.isApproved && (
+                                                <button onClick={() => deleteUser(u.id)} className="px-2 py-1 text-xs border border-red-200 rounded bg-red-50 text-red-600 hover:bg-red-100 flex items-center justify-center animate-in fade-in" title="Eliminar Solicitud">
+                                                    <Trash2 size={14} />
+                                                </button>
+                                            )}
                                             <button onClick={() => updateUserStatus(u.id, 'role', u.role === 'admin' ? 'user' : 'admin')} className="flex-1 px-2 py-1 text-xs border rounded text-amber-600">{u.role === 'admin' ? 'Bajar' : 'Subir'}</button>
                                         </>
                                     )}
@@ -1089,21 +1138,74 @@ const UserView = ({ staticPlan, dailyContentMap, completionsMap, commentsMap, bi
 
 // --- MAIN APP ---
 export default function App() {
-    const [user, setUser] = useState(null);
-    const [userData, setUserData] = useState(null);
-    const [loading, setLoading] = useState(true);
+    const [user, setUser] = useState(() => {
+        const cachedUid = safeLocalStorage.getItem('tp_last_uid');
+        return cachedUid ? { uid: cachedUid } : null;
+    });
+    const [userData, setUserData] = useState(() => {
+        const cachedUid = safeLocalStorage.getItem('tp_last_uid');
+        if (cachedUid) {
+            try {
+                return JSON.parse(safeLocalStorage.getItem(`tp_user_data_${cachedUid}`) || 'null');
+            } catch (e) {
+                return null;
+            }
+        }
+        return null;
+    });
+    const [loading, setLoading] = useState(() => {
+        const cachedUid = safeLocalStorage.getItem('tp_last_uid');
+        const cachedUserData = cachedUid ? safeLocalStorage.getItem(`tp_user_data_${cachedUid}`) : null;
+        return !(cachedUid && cachedUserData);
+    });
 
     // Data State
     const [staticPlan] = useState(generateStaticPlan());
-    const [dailyContentMap, setDailyContentMap] = useState({});
+    const [dailyContentMap, setDailyContentMap] = useState(() => {
+        try {
+            return JSON.parse(safeLocalStorage.getItem('tp_daily_content') || '{}');
+        } catch (e) {
+            return {};
+        }
+    });
     const [allUsers, setAllUsers] = useState([]);
     const [allCompletions, setAllCompletions] = useState([]);
-    const [completionsMap, setCompletionsMap] = useState({});
-    const [commentsMap, setCommentsMap] = useState({});
+    const [completionsMap, setCompletionsMap] = useState(() => {
+        const cachedUid = safeLocalStorage.getItem('tp_last_uid');
+        if (cachedUid) {
+            try {
+                return JSON.parse(safeLocalStorage.getItem(`tp_completions_${cachedUid}`) || '{}');
+            } catch (e) {
+                return {};
+            }
+        }
+        return {};
+    });
+    const [commentsMap, setCommentsMap] = useState(() => {
+        try {
+            return JSON.parse(safeLocalStorage.getItem('tp_comments_map') || '{}');
+        } catch (e) {
+            return {};
+        }
+    });
 
     // Calculated State
-    const [streak, setStreak] = useState(0);
-    const [bibleProgress, setBibleProgress] = useState(0);
+    const [streak, setStreak] = useState(() => {
+        const cachedUid = safeLocalStorage.getItem('tp_last_uid');
+        if (cachedUid) {
+            const val = safeLocalStorage.getItem(`tp_streak_${cachedUid}`);
+            return val ? parseInt(val, 10) : 0;
+        }
+        return 0;
+    });
+    const [bibleProgress, setBibleProgress] = useState(() => {
+        const cachedUid = safeLocalStorage.getItem('tp_last_uid');
+        if (cachedUid) {
+            const val = safeLocalStorage.getItem(`tp_progress_${cachedUid}`);
+            return val ? parseFloat(val) : 0;
+        }
+        return 0;
+    });
 
     // AUTH
     useEffect(() => {
@@ -1129,7 +1231,11 @@ export default function App() {
 
         const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
             setUser(currentUser);
-            if (!currentUser) { setLoading(false); setUserData(null); }
+            if (!currentUser) {
+                setLoading(false);
+                setUserData(null);
+                safeLocalStorage.removeItem('tp_last_uid');
+            }
         });
         return () => unsubscribe();
     }, []);
@@ -1177,8 +1283,14 @@ export default function App() {
         if (!user) return;
         const userRef = doc(db, 'artifacts', APP_ID, 'users', user.uid);
         const unsubscribe = onSnapshot(userRef, (docSnap) => {
-            if (docSnap.exists()) setUserData(docSnap.data());
-            else setUserData(null);
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                setUserData(data);
+                safeLocalStorage.setItem('tp_last_uid', user.uid);
+                safeLocalStorage.setItem(`tp_user_data_${user.uid}`, JSON.stringify(data));
+            } else {
+                setUserData(null);
+            }
             setLoading(false);
         });
         return () => unsubscribe();
@@ -1192,6 +1304,7 @@ export default function App() {
             const map = {};
             snap.docs.forEach(d => map[d.id] = d.data());
             setDailyContentMap(map);
+            safeLocalStorage.setItem('tp_daily_content', JSON.stringify(map));
         });
 
         const unsubComments = onSnapshot(query(collection(db, 'artifacts', APP_ID, 'comments'), orderBy('createdAt', 'desc')), snap => {
@@ -1202,6 +1315,7 @@ export default function App() {
                 map[d.readingId].push({ id: doc.id, ...d });
             });
             setCommentsMap(map);
+            safeLocalStorage.setItem('tp_comments_map', JSON.stringify(map));
         });
 
         const unsubCompletions = onSnapshot(query(collection(db, 'artifacts', APP_ID, 'completions'), where('userId', '==', userData.uid)), snap => {
@@ -1228,6 +1342,7 @@ export default function App() {
                 }
             });
             setCompletionsMap(map);
+            safeLocalStorage.setItem(`tp_completions_${userData.uid}`, JSON.stringify(map));
 
             // --- CÁLCULO DE RACHA REAL (DÍAS CONSECUTIVOS) ---
             let currentStreak = 0;
@@ -1265,7 +1380,11 @@ export default function App() {
             }
 
             setStreak(currentStreak);
-            setBibleProgress(Math.min(100, Number(((count / 365) * 100).toFixed(1))));
+            safeLocalStorage.setItem(`tp_streak_${userData.uid}`, String(currentStreak));
+
+            const progressVal = Math.min(100, Number(((count / 365) * 100).toFixed(1)));
+            setBibleProgress(progressVal);
+            safeLocalStorage.setItem(`tp_progress_${userData.uid}`, String(progressVal));
         });
 
         // Admin data load
@@ -1315,7 +1434,11 @@ export default function App() {
         }
     };
 
-    const handleLogout = async () => { await signOut(auth); window.location.reload(); };
+    const handleLogout = async () => {
+        await signOut(auth);
+        safeLocalStorage.removeItem('tp_last_uid');
+        window.location.reload();
+    };
 
     // --- RENDERING ---
     const [view, setView] = useState('dashboard'); // 'dashboard' or 'admin'
